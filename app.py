@@ -197,7 +197,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("📄 Invoice Processor – A→Z")
+st.title("📄 Silog Invoice Processor – A→Z")
 st.caption(
     "Upload freight invoices → Extract Invoice Date, Shipper, Weight, Volume, "
     "Chargeable, Subtotal, Freight Mode & Rate → Download Excel summary."
