@@ -16,6 +16,14 @@ import streamlit as st
 from openpyxl import Workbook
 
 # ─────────────────────────────────────────────────────────────
+# NEW HELPER: Extract only invoice number like SY0050227 or SY0050227A
+# ─────────────────────────────────────────────────────────────
+def extract_invoice_id(filename: str):
+    match = re.search(r"(SY\d+[A-Z]?)", filename.upper())
+    return match.group(1) if match else filename
+
+
+# ─────────────────────────────────────────────────────────────
 # Fixed header row (from your watcher script)
 # ─────────────────────────────────────────────────────────────
 HEADERS: List[str] = [
@@ -67,8 +75,8 @@ CURRENCY_ANY = re.compile(r"\b(CAD|USD|EUR|GBP|AUD)\b", re.I)
 
 def parse_invoice_pdf_bytes(data: bytes, filename: str) -> Optional[Dict[str, Any]]:
     """
-    Streamlit-friendly version of parse_pdf(path):
-    Takes PDF bytes + filename, returns a dict row using your original logic.
+    Streamlit-friendly version of parse_pdf(path).
+    Uses extracted invoice ID instead of full filename.
     """
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
@@ -152,7 +160,10 @@ def parse_invoice_pdf_bytes(data: bytes, filename: str) -> Optional[Dict[str, An
 
         return {
             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Filename": os.path.basename(filename),
+
+            # 🔥 FIXED: we store ONLY invoice ID
+            "Filename": filename,
+
             "Invoice_Date": inv_date,
             "Currency": currency,
             "Shipper": shipper,
@@ -216,11 +227,17 @@ if extract_btn and uploads and not too_big:
     for i, f in enumerate(uploads, start=1):
         status.write(f"Parsing: **{f.name}**")
         data = f.read()
-        row = parse_invoice_pdf_bytes(data, filename=f.name)
+
+        # 🔥 NEW: Clean filename to extract invoice ID
+        invoice_id = extract_invoice_id(f.name)
+
+        row = parse_invoice_pdf_bytes(data, filename=invoice_id)
+
         if row:
             rows.append(row)
         else:
             st.warning(f"⚠️ Nothing extracted from {f.name}")
+
         progress.progress(i / total)
 
     if not rows:
@@ -236,7 +253,7 @@ if extract_btn and uploads and not too_big:
         st.subheader("Preview")
         st.dataframe(df, use_container_width=True)
 
-        # Build Excel in memory (no file system needed)
+        # Build Excel in memory
         output = io.BytesIO()
         wb = Workbook()
         ws = wb.active
