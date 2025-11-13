@@ -16,15 +16,27 @@ import streamlit as st
 from openpyxl import Workbook
 
 # ─────────────────────────────────────────────────────────────
-# NEW HELPER: Extract only invoice number like SY0050227 or SY0050227A
+# UNIVERSAL INVOICE NUMBER EXTRACTOR
 # ─────────────────────────────────────────────────────────────
 def extract_invoice_id(filename: str):
-    match = re.search(r"(SY\d+[A-Z]?)", filename.upper())
-    return match.group(1) if match else filename
+    filename = filename.upper()
+
+    # 1. Try SY pattern first
+    m = re.search(r"(SY\d+[A-Z]?)", filename)
+    if m:
+        return m.group(1)
+
+    # 2. Extract first number + optional last letter (ex: 42308, 55671A)
+    m = re.search(r"(\d+[A-Z]?)", filename)
+    if m:
+        return m.group(1)
+
+    # 3. Fallback: return filename without extension
+    return os.path.splitext(filename)[0]
 
 
 # ─────────────────────────────────────────────────────────────
-# Fixed header row (from your watcher script)
+# Fixed header row
 # ─────────────────────────────────────────────────────────────
 HEADERS: List[str] = [
     "Timestamp", "Filename", "Invoice_Date", "Currency", "Shipper",
@@ -33,7 +45,7 @@ HEADERS: List[str] = [
 ]
 
 # ─────────────────────────────────────────────────────────────
-# Helper functions + regex (copied from your script)
+# Helper functions + regex (copied from watcher logic)
 # ─────────────────────────────────────────────────────────────
 
 _f = lambda s: float(s.replace(",", "")) if s else None
@@ -73,22 +85,19 @@ SUBTOTAL_PAT = re.compile(
 CURRENCY_ANY = re.compile(r"\b(CAD|USD|EUR|GBP|AUD)\b", re.I)
 
 
+# ─────────────────────────────────────────────────────────────
+# PARSE ONE PDF (unchanged except for filename handling)
+# ─────────────────────────────────────────────────────────────
 def parse_invoice_pdf_bytes(data: bytes, filename: str) -> Optional[Dict[str, Any]]:
-    """
-    Streamlit-friendly version of parse_pdf(path).
-    Uses extracted invoice ID instead of full filename.
-    """
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             text = "\n".join(p.extract_text() or "" for p in pdf.pages)
 
-        # Invoice Date
         inv_date = None
         m = INVOICE_DATE_PAT.search(text)
         if m:
             inv_date = m.group(1).strip().upper()
 
-        # Currency
         currency = "USD"
         m = SUBTOTAL_PAT.search(text)
         if m and m.group(1):
@@ -98,13 +107,11 @@ def parse_invoice_pdf_bytes(data: bytes, filename: str) -> Optional[Dict[str, An
             if m:
                 currency = m.group(1).upper()
 
-        # Shipper
         shipper = None
         m = SHIPPER_PAT.search(text)
         if m:
             shipper = re.sub(r"\s+", " ", m.group(1).strip())
 
-        # Pieces, weight, volume
         pieces = w_kg = v_m3 = None
         m = ROW_PIECES_GW_VOL_PAT.search(text)
         if m:
@@ -118,20 +125,22 @@ def parse_invoice_pdf_bytes(data: bytes, filename: str) -> Optional[Dict[str, An
                 w, v = m.groups()
                 w_kg = _f(w)
                 v_m3 = _f(v)
+
             if pieces is None:
                 m = PIECES_PAT.search(text)
                 if m:
                     pieces = int(m.group(1))
+
             if w_kg is None:
                 m = GW_PAT.search(text)
                 if m:
                     w_kg = _f(m.group(1))
+
             if v_m3 is None:
                 m = VOL_PAT.search(text)
                 if m:
                     v_m3 = _f(m.group(1))
 
-        # Chargeable weight / CBM
         c_kg = c_cbm = None
         m = CHARGEABLE_PAT.search(text)
         if m:
@@ -142,13 +151,11 @@ def parse_invoice_pdf_bytes(data: bytes, filename: str) -> Optional[Dict[str, An
             else:
                 c_cbm = val
 
-        # Subtotal
         subtotal = None
         m = SUBTOTAL_PAT.search(text)
         if m:
             subtotal = _f(m.group(2))
 
-        # Freight
         f_mode = f_rate = None
         m = AIR_FRT_PAT.search(text)
         if m:
@@ -161,7 +168,7 @@ def parse_invoice_pdf_bytes(data: bytes, filename: str) -> Optional[Dict[str, An
         return {
             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 
-            # 🔥 FIXED: we store ONLY invoice ID
+            # 🔥 FIXED: Store ONLY the extracted invoice ID
             "Filename": filename,
 
             "Invoice_Date": inv_date,
@@ -184,7 +191,6 @@ def parse_invoice_pdf_bytes(data: bytes, filename: str) -> Optional[Dict[str, An
 # ─────────────────────────────────────────────────────────────
 # STREAMLIT UI
 # ─────────────────────────────────────────────────────────────
-
 st.set_page_config(
     page_title="Invoice Processor – A→Z (Streamlit)",
     page_icon="📄",
@@ -193,7 +199,7 @@ st.set_page_config(
 
 st.title("📄 Invoice Processor – A→Z")
 st.caption(
-    "Upload freight invoices (PDF) → Extract Invoice Date, Shipper, Weight, Volume, "
+    "Upload freight invoices → Extract Invoice Date, Shipper, Weight, Volume, "
     "Chargeable, Subtotal, Freight Mode & Rate → Download Excel summary."
 )
 
@@ -201,7 +207,7 @@ uploads = st.file_uploader(
     "Upload PDF invoice files",
     type=["pdf"],
     accept_multiple_files=True,
-    help="Drag & drop or browse one or more PDF files.",
+    help="Drag & drop or browse invoices.",
 )
 
 MAX_MB = 25
@@ -212,23 +218,20 @@ if uploads:
             st.error(f"❌ {f.name} is larger than {MAX_MB} MB")
             too_big = True
 
-extract_btn = st.button(
-    "Extract Invoices",
-    type="primary",
-    disabled=(not uploads or too_big),
-)
+extract_btn = st.button("Extract Invoices", type="primary", disabled=(not uploads or too_big))
 
 if extract_btn and uploads and not too_big:
     rows: List[Dict[str, Any]] = []
-    progress = st.progress(0, text="Extracting…")
+    progress = st.progress(0)
     status = st.empty()
 
     total = len(uploads)
     for i, f in enumerate(uploads, start=1):
         status.write(f"Parsing: **{f.name}**")
+
         data = f.read()
 
-        # 🔥 NEW: Clean filename to extract invoice ID
+        # 🔥 APPLY INVOICE ID CLEANING HERE
         invoice_id = extract_invoice_id(f.name)
 
         row = parse_invoice_pdf_bytes(data, filename=invoice_id)
@@ -236,42 +239,38 @@ if extract_btn and uploads and not too_big:
         if row:
             rows.append(row)
         else:
-            st.warning(f"⚠️ Nothing extracted from {f.name}")
+            st.warning(f"⚠️ Could not extract data from {f.name}")
 
         progress.progress(i / total)
 
     if not rows:
-        st.error("❌ No data extracted from any file.")
+        st.error("❌ No data extracted.")
     else:
-        # Build DataFrame and ensure column order
         df = pd.DataFrame(rows)
         for col in HEADERS:
             if col not in df.columns:
                 df[col] = None
         df = df[HEADERS]
 
-        st.subheader("Preview")
+        st.subheader("Preview Results")
         st.dataframe(df, use_container_width=True)
 
         # Build Excel in memory
         output = io.BytesIO()
         wb = Workbook()
         ws = wb.active
-        ws.title = "Invoice_Summary"
-
-        # Header
         ws.append(HEADERS)
-        # Rows
         for _, r in df.iterrows():
             ws.append([r[h] for h in HEADERS])
-
         wb.save(output)
         output.seek(0)
 
-        st.success(f"✅ Extraction complete. {len(rows)} row(s) extracted.")
+        st.success(f"✅ Extraction complete! {len(rows)} invoices processed.")
+
         st.download_button(
-            label="⬇️ Download Excel (Invoice_Summary.xlsx)",
+            "⬇️ Download Excel",
             data=output,
             file_name="Invoice_Summary.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
